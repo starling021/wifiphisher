@@ -6,6 +6,7 @@ the program
 import random
 import pyric
 import pyric.pyw as pyw
+import dbus
 import wifiphisher.common.constants as constants
 
 
@@ -136,6 +137,30 @@ class InterfaceCantBeFoundError(Exception):
         Exception.__init__(self, message)
 
 
+class InterfaceManagedByNetworkManagerError(Exception):
+    """
+    Exception class to raise in case of NetworkManager controls the AP or deauth interface
+    """
+    def __init__(self, interface_name):
+        """
+        Construct the class.
+        :param self: An InterfaceManagedByNetworkManagerError object
+        :param interface_name: Name of interface
+        :type self: InterfaceManagedByNetworkManagerError
+        :type interface_name: str
+        :return: None
+        :rtype: None
+        """
+
+        message = (
+            "Interface \"{0}\" is controlled by NetworkManager."
+            "You need to manually set the devices that should be ignored by NetworkManager "
+            "using the keyfile plugin (unmanaged-directive). For example, '[keyfile] "
+            "unmanaged-devices=interface-name:\"{0}\"' needs to be added in your "
+            "NetworkManager configuration file.".format(interface_name))
+        Exception.__init__(self, message)
+
+
 class NetworkAdapter(object):
     """ This class represents a network interface """
 
@@ -160,6 +185,7 @@ class NetworkAdapter(object):
         self._has_ap_mode = False
         self._has_monitor_mode = False
         self._is_wireless = False
+        self._is_managed_by_nm = False
         self._card = card_obj
         self._original_mac_address = mac_address
         self._current_mac_address = mac_address
@@ -176,6 +202,37 @@ class NetworkAdapter(object):
         """
 
         return self._name
+
+    @property
+    def is_managed_by_nm(self):
+        """
+        Return whether the interface controlled by NetworkManager
+
+        :param self: A NetworkAdapter object
+        :type self: NetworkAdapter
+        :return: True if interface is controlled by NetworkManager
+        :rtype: bool
+        """
+        return self._is_managed_by_nm
+
+    @is_managed_by_nm.setter
+    def is_managed_by_nm(self, value):
+        """
+        Set whether the interface is controlled by NetworkManager
+
+        :param self: A NetworkAdapter object
+        :param value: A value representing interface controlled by NetworkManager
+        :type self: NetworkAdapter
+        :type value: bool
+        :return: None
+        :rtype: None
+        :raises InvalidValueError: When the given value is not bool
+        """
+
+        if isinstance(value, bool):
+            self._is_managed_by_nm = value
+        else:
+            raise InvalidValueError(value, bool)
 
     @property
     def has_ap_mode(self):
@@ -346,6 +403,7 @@ class NetworkManager(object):
 
         self._name_to_object = dict()
         self._active = set()
+        self._exclude_shutdown = set()
 
     def is_interface_valid(self, interface_name, mode=None):
         """
@@ -360,19 +418,28 @@ class NetworkManager(object):
         :return: True if interface is valid
         :rtype: bool
         :raises InvalidInterfaceError: If the interface is invalid
-        .. note: The available modes are monitor and AP
+        :raises InterfaceManagedByNetworkManagerError: If the card is managed and
+                is being used as deauth/ap mode
+        .. note: The available modes are monitor, AP and internet
+            The internet adapter should be put in the _exclude_shutdown set
+            so that it will not be shutdown after the program exits.
         """
 
         # raise an error if interface can't be found
         try:
             interface_adapter = self._name_to_object[interface_name]
+            if mode == "internet":
+                self._exclude_shutdown.add(interface_name)
 
             # raise an error if interface doesn't support the mode
+            if mode != "internet" and interface_adapter.is_managed_by_nm:
+                raise InterfaceManagedByNetworkManagerError(interface_name)
             if mode == "monitor" and not interface_adapter.has_monitor_mode:
                 raise InvalidInterfaceError(interface_name, mode)
             elif mode == "AP" and not interface_adapter.has_ap_mode:
                 raise InvalidInterfaceError(interface_name, mode)
-
+            # add the valid card to _active set
+            self._active.add(interface_name)
             return True
         except KeyError:
             raise InvalidInterfaceError(interface_name)
@@ -517,6 +584,9 @@ class NetworkManager(object):
 
         # return interface if found otherwise raise an error
         if chosen_interface:
+            adapter = self._name_to_object[chosen_interface]
+            if adapter.is_managed_by_nm:
+                raise InterfaceManagedByNetworkManagerError(chosen_interface)
             self._active.add(chosen_interface)
             return chosen_interface
         else:
@@ -633,12 +703,53 @@ class NetworkManager(object):
         :type self: NetworkManager
         :return: None
         :rtype: None
+        ..note: The cards in _exclude_shutdown will not set to the original mac address
+                since these cards are not changed the mac addresses by the program.
         """
 
         for interface in self._active:
-            mac_address = self._name_to_object[interface].original_mac_address
+            if interface not in self._exclude_shutdown:
+                adapter = self._name_to_object[interface]
+                mac_address = adapter.original_mac_address
+                self.set_interface_mac(interface, mac_address)
 
-            self.set_interface_mac(interface, mac_address)
+
+def is_managed_by_network_manager(interface_name):
+    """
+    Check if the interface is managed by NetworkManager
+
+    :param network_adapter: A NetworkAdapter object
+    :type interface_name: NetworkAdapter
+    :return if managed by NetworkManager return True
+    :rtype: bool
+    .. note: When the NetworkManager service is not running, using bus.get_object
+        will raise the exception. It's safe to pass this exception since when
+        NetworkManger doesn't run, the manage property will be un-managed.
+
+        We first create the network_manager_proxy first, and use it to get the
+        network_manager object that implements the interface NM_MANAGER_INTERFACE_PATH.
+        This network_manager object can then get all the assoicated devices, and we can
+        uses these devices' paths to get the device objects. After finding the target
+        device object we can then check if this device is managed by NetworkManager or not.
+    """
+
+    bus = dbus.SystemBus()
+    is_managed = False
+    try:
+        network_manager_proxy = bus.get_object(constants.NM_APP_PATH, constants.NM_MANAGER_OBJ_PATH)
+        network_manager = dbus.Interface(
+            network_manager_proxy,
+            dbus_interface=constants.NM_MANAGER_INTERFACE_PATH)
+        devices = network_manager.GetDevices()
+        for dev_obj_path in devices:
+            device_proxy = bus.get_object(constants.NM_APP_PATH, dev_obj_path)
+            device = dbus.Interface(device_proxy, dbus_interface=dbus.PROPERTIES_IFACE)
+            if device.Get(constants.NM_DEV_INTERFACE_PATH, 'Interface') == interface_name:
+                is_managed = device.Get(constants.NM_DEV_INTERFACE_PATH, 'Managed')
+                break
+    except dbus.exceptions.DBusException:
+        pass
+    return bool(is_managed)
 
 
 def interface_property_detector(network_adapter):
@@ -661,6 +772,9 @@ def interface_property_detector(network_adapter):
         network_adapter.has_ap_mode = True
     if pyw.iswireless(network_adapter.name):
         network_adapter.is_wireless = True
+
+    interface_name = network_adapter.name
+    network_adapter.is_managed_by_nm = is_managed_by_network_manager(interface_name)
 
 
 def generate_random_address():

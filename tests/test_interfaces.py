@@ -778,6 +778,103 @@ class TestNetworkManager(unittest.TestCase):
 
         self.assertEqual(self.network_manager.get_interface_mac(interface_name), self.mac_address)
 
+    def test_get_interface_1_ap_1_mon_internet_interfaces(self):
+        """
+        Test with jamming case with internet connection
+        The managed property is correctly set in the NetworkManager.conf
+        This case should not raise any exception
+        """
+
+        network_manager = interfaces.NetworkManager()
+        ap_adapter = interfaces.NetworkAdapter('wlan0', "CARD", "00:00:00:00:00:00")
+        jamming_adapter = interfaces.NetworkAdapter('wlan1', "CARD", "00:00:00:00:00:01")
+        internet_adapter = interfaces.NetworkAdapter('wlan2', "CARD", "00:00:00:00:00:02")
+
+        ap_adapter.is_managed_by_nm = False
+        ap_adapter.has_ap_mode = True
+        jamming_adapter.is_managed_by_nm = False
+        jamming_adapter.has_monitor_mode = True
+        internet_adapter.is_managed_by_nm = True
+
+        network_manager._name_to_object['wlan0'] = ap_adapter
+        network_manager._name_to_object['wlan1'] = jamming_adapter
+        network_manager._name_to_object['wlan2'] = internet_adapter
+
+        network_manager.is_interface_valid("wlan2", "internet")
+        network_manager.is_interface_valid("wlan1", "monitor")
+        network_manager.is_interface_valid("wlan0", "AP")
+
+        assert len(network_manager._active) == 3
+
+    def test_get_interfaces_1_ap_1_internet_error(self):
+        """
+        Test with the AP interface is set to managed in NetworkManager.conf
+        This case should raise InterfaceManagedByNetworkManagerError exception
+        """
+
+        network_manager = interfaces.NetworkManager()
+        ap_adapter = interfaces.NetworkAdapter('wlan0', "CARD", "00:00:00:00:00:00")
+        jamming_adapter = interfaces.NetworkAdapter('wlan1', "CARD", "00:00:00:00:00:01")
+        internet_adapter = interfaces.NetworkAdapter('wlan2', "CARD", "00:00:00:00:00:02")
+
+        ap_adapter.is_managed_by_nm = True
+        ap_adapter.has_ap_mode = True
+        internet_adapter.is_managed_by_nm = True
+
+        network_manager._name_to_object['wlan0'] = ap_adapter
+        network_manager._name_to_object['wlan2'] = internet_adapter
+
+        network_manager.is_interface_valid("wlan2", "internet")
+        self.assertRaises(interfaces.InterfaceManagedByNetworkManagerError,
+            network_manager.is_interface_valid, "wlan0", "AP")
+
+    def test_get_interface_automatically_1_ap_1_mon_1_internet_interfaces(self):
+        """
+        Test three interfaces ap/deauth/internet iface
+        Assume AP/Deauth interfaces are both unmanaged in NetworkManager.conf
+        """
+
+        network_manager = interfaces.NetworkManager()
+        ap_adapter = interfaces.NetworkAdapter('wlan0', "CARD", "00:00:00:00:00:00")
+        jamming_adapter = interfaces.NetworkAdapter('wlan1', "CARD", "00:00:00:00:00:01")
+        internet_adapter = interfaces.NetworkAdapter('wlan2', "CARD", "00:00:00:00:00:02")
+
+        ap_adapter.is_managed_by_nm = False
+        ap_adapter.has_ap_mode = True
+        jamming_adapter.is_managed_by_nm = False
+        jamming_adapter.has_monitor_mode = True
+        internet_adapter.is_managed_by_nm = True
+
+        network_manager._name_to_object['wlan0'] = ap_adapter
+        network_manager._name_to_object['wlan1'] = jamming_adapter
+        network_manager._name_to_object['wlan2'] = internet_adapter
+
+        network_manager.is_interface_valid("wlan2", "internet")
+        network_manager.get_interface_automatically()
+        assert len(network_manager._active) == 3
+
+    def test_get_interface_automatically_1_ap_1_internet_error(self):
+        """
+        Test -nJ case but with automatically find AP card
+        Assume AP interface is managed in NetworkManager.conf
+        """
+
+        network_manager = interfaces.NetworkManager()
+        ap_adapter = interfaces.NetworkAdapter('wlan0', "CARD", "00:00:00:00:00:00")
+        jamming_adapter = interfaces.NetworkAdapter('wlan1', "CARD", "00:00:00:00:00:01")
+        internet_adapter = interfaces.NetworkAdapter('wlan2', "CARD", "00:00:00:00:00:02")
+
+        ap_adapter.is_managed_by_nm = True
+        ap_adapter.has_ap_mode = True
+        internet_adapter.is_managed_by_nm = True
+
+        network_manager._name_to_object['wlan0'] = ap_adapter
+        network_manager._name_to_object['wlan2'] = internet_adapter
+
+        network_manager.is_interface_valid("wlan2", "internet")
+        self.assertRaises(interfaces.InterfaceManagedByNetworkManagerError,
+            network_manager.get_interface, has_ap_mode=True)
+
 
 class TestGenerateRandomAddress(unittest.TestCase):
     """ Test generate_random_address function """
